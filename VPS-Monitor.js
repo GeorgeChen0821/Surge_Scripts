@@ -10,7 +10,7 @@
  *
  * 多台服务器参数（字段中的特殊字符请先做 URL 编码）：
  *   server1=名称|bwg|VEID|API_KEY|YYYY-MM-DD
- *   server2=V.PS|vps|ACCOUNT_EMAIL|ACCOUNT_PASSWORD|
+ *   server2=V.PS|vps|API_TOKEN||
  *   server3=名称|json|URL|BEARER_TOKEN|YYYY-MM-DD
  */
 
@@ -156,8 +156,7 @@ function parseServerValue(value) {
     return normalizeServerConfig({
       name: parts[0] || "V.PS",
       provider: "vps",
-      username: parts[2],
-      password: parts[3]
+      token: parts[2]
     });
   }
 
@@ -177,8 +176,6 @@ function normalizeServerConfig(config) {
     apiKey: String(config.apiKey || config.apikey || config.api_key || ""),
     url: String(config.url || config.endpoint || ""),
     token: String(config.token || ""),
-    username: String(config.username || config.email || ""),
-    password: String(config.password || ""),
     headers: config.headers && typeof config.headers === "object" ? config.headers : null,
     expires: config.expires || config.expires_at || config.expiration || "",
     error: config.error || ""
@@ -273,14 +270,14 @@ function fetchBwg(server, callback, timeout) {
 }
 
 function fetchVpsAccount(server, callback, timeout) {
-  if (!server.username || !server.password) {
-    callback(errorResult(server, "缺少 V.PS 登录邮箱或密码"));
+  if (!server.token) {
+    callback(errorResult(server, "缺少 V.PS API Token"));
     return;
   }
 
   var headers = {
     Accept: "application/json",
-    Authorization: "Basic " + base64EncodeUtf8(server.username + ":" + server.password)
+    Authorization: /^Bearer\s/i.test(server.token) ? server.token : "Bearer " + server.token
   };
 
   getJson("https://vps.hosting/api/service", headers, timeout, function (error, json) {
@@ -739,33 +736,6 @@ function sumNumbers(items, key) {
     }
   });
   return found ? total : null;
-}
-
-function base64EncodeUtf8(value) {
-  var encoded = encodeURIComponent(String(value));
-  var bytes = [];
-  for (var i = 0; i < encoded.length; i += 1) {
-    if (encoded.charAt(i) === "%") {
-      bytes.push(parseInt(encoded.slice(i + 1, i + 3), 16));
-      i += 2;
-    } else {
-      bytes.push(encoded.charCodeAt(i));
-    }
-  }
-
-  var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  var output = "";
-  for (var offset = 0; offset < bytes.length; offset += 3) {
-    var a = bytes[offset];
-    var b = offset + 1 < bytes.length ? bytes[offset + 1] : 0;
-    var c = offset + 2 < bytes.length ? bytes[offset + 2] : 0;
-    var triple = (a << 16) | (b << 8) | c;
-    output += alphabet.charAt((triple >> 18) & 63);
-    output += alphabet.charAt((triple >> 12) & 63);
-    output += offset + 1 < bytes.length ? alphabet.charAt((triple >> 6) & 63) : "=";
-    output += offset + 2 < bytes.length ? alphabet.charAt(triple & 63) : "=";
-  }
-  return output;
 }
 
 function nullableNumber(value) {
