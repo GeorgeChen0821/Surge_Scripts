@@ -1,0 +1,9 @@
+#!name=VPS Monitor
+#!desc=全自动聚合显示 BWG 与 V.PS 的流量、状态和到期日。V.PS Token 失效时自动重新登录；参数仅保存在本地 Surge。
+#!arguments=BWG_VEID=&BWG_API_KEY=&VPS_EMAIL=&VPS_PASSWORD=
+
+[Script]
+VPS Monitor = type=generic,timeout=15,script-path=https://raw.githubusercontent.com/GeorgeChen0821/Surge_Scripts/refs/heads/main/VPS-Monitor.js?v=20260803-1,script-update-interval=3600,argument=panel_title=我的 VPS&server1=BWG|bwg|%BWG_VEID%|%BWG_API_KEY%|&server2=V.PS|vps|||%VPS_EMAIL%|%VPS_PASSWORD%
+
+[Panel]
+VPS Monitor = script-name=VPS Monitor,update-interval=600
