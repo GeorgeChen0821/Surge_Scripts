@@ -10,7 +10,7 @@
  *
  * 多台服务器参数（字段中的特殊字符请先做 URL 编码）：
  *   server1=名称|bwg|VEID|API_KEY|YYYY-MM-DD
- *   server2=V.PS|vps|API_TOKEN||
+ *   server2=V.PS|vps|ACCESS_TOKEN|REFRESH_TOKEN|
  *   server3=名称|json|URL|BEARER_TOKEN|YYYY-MM-DD
  */
 
@@ -156,7 +156,8 @@ function parseServerValue(value) {
     return normalizeServerConfig({
       name: parts[0] || "V.PS",
       provider: "vps",
-      token: parts[2]
+      token: parts[2],
+      refreshToken: parts[3]
     });
   }
 
@@ -176,6 +177,7 @@ function normalizeServerConfig(config) {
     apiKey: String(config.apiKey || config.apikey || config.api_key || ""),
     url: String(config.url || config.endpoint || ""),
     token: String(config.token || ""),
+    refreshToken: String(config.refreshToken || config.refresh || config.refresh_token || ""),
     headers: config.headers && typeof config.headers === "object" ? config.headers : null,
     expires: config.expires || config.expires_at || config.expiration || "",
     error: config.error || ""
@@ -270,19 +272,40 @@ function fetchBwg(server, callback, timeout) {
 }
 
 function fetchVpsAccount(server, callback, timeout) {
-  if (!server.token) {
-    callback(errorResult(server, "缺少 V.PS API Token"));
+  if (!server.token && !server.refreshToken) {
+    callback(errorResult(server, "缺少 V.PS Access Token 或 Refresh Token"));
     return;
   }
 
-  var headers = {
-    Accept: "application/json",
-    Authorization: /^Bearer\s/i.test(server.token) ? server.token : "Bearer " + server.token
-  };
+  resolveVpsAuth(server, timeout, function (authError, auth) {
+    if (authError) {
+      callback(errorResult(server, authError));
+      return;
+    }
+    fetchVpsServices(server, auth, timeout, callback, false);
+  });
+}
 
-  getJson("https://vps.hosting/api/service", headers, timeout, function (error, json) {
+function fetchVpsServices(server, auth, timeout, callback, retried) {
+  var headers = vpsAuthHeaders(auth.token);
+
+  getJson("https://vps.hosting/api/service", headers, timeout, function (error, json, status) {
+    if (status === 401 && auth.refresh && !retried) {
+      refreshVpsAuth(server, auth.refresh, timeout, function (refreshError, refreshedAuth) {
+        if (refreshError) {
+          callback(errorResult(server, refreshError));
+          return;
+        }
+        fetchVpsServices(server, refreshedAuth, timeout, callback, true);
+      });
+      return;
+    }
+
     if (error) {
-      callback(errorResult(server, error));
+      var message = status === 401
+        ? "V.PS Access Token 已失效，请更新 Token"
+        : error;
+      callback(errorResult(server, message));
       return;
     }
 
@@ -324,6 +347,142 @@ function fetchVpsAccount(server, callback, timeout) {
       }
     }
   });
+}
+
+function resolveVpsAuth(server, timeout, callback) {
+  var auth = loadVpsAuth(server);
+  if ((!auth.token || jwtExpiresSoon(auth.token, 60)) && auth.refresh) {
+    refreshVpsAuth(server, auth.refresh, timeout, callback);
+    return;
+  }
+
+  if (!auth.token) {
+    callback("缺少可用的 V.PS Access Token");
+    return;
+  }
+
+  callback(null, auth);
+}
+
+function refreshVpsAuth(server, refreshToken, timeout, callback) {
+  postJson(
+    "https://vps.hosting/api/token",
+    { refresh_token: stripBearer(refreshToken) },
+    timeout,
+    function (error, json, status) {
+      if (error) {
+        var message = status === 401 || status === 403
+          ? "V.PS Refresh Token 已失效，请重新生成 Token"
+          : "V.PS Token 刷新失败：" + error;
+        callback(message);
+        return;
+      }
+
+      var payload = json && json.data && typeof json.data === "object" ? json.data : (json || {});
+      var token = stripBearer(payload.token || payload.access_token || "");
+      var refresh = stripBearer(payload.refresh || payload.refresh_token || refreshToken || "");
+      if (!token) {
+        callback("V.PS Token 刷新失败：接口未返回 Access Token");
+        return;
+      }
+
+      var auth = { token: token, refresh: refresh };
+      saveVpsAuth(server, auth);
+      callback(null, auth);
+    }
+  );
+}
+
+function loadVpsAuth(server) {
+  var configured = {
+    token: stripBearer(server.token),
+    refresh: stripBearer(server.refreshToken)
+  };
+
+  if (typeof $persistentStore === "undefined" || !$persistentStore ||
+      typeof $persistentStore.read !== "function") {
+    return configured;
+  }
+
+  try {
+    var saved = JSON.parse($persistentStore.read(vpsAuthStoreKey(server)) || "null");
+    if (!saved || typeof saved !== "object") return configured;
+    return {
+      token: stripBearer(saved.token || configured.token),
+      refresh: stripBearer(saved.refresh || configured.refresh)
+    };
+  } catch (_) {
+    return configured;
+  }
+}
+
+function saveVpsAuth(server, auth) {
+  if (typeof $persistentStore === "undefined" || !$persistentStore ||
+      typeof $persistentStore.write !== "function") return;
+
+  try {
+    $persistentStore.write(JSON.stringify({
+      token: stripBearer(auth.token),
+      refresh: stripBearer(auth.refresh)
+    }), vpsAuthStoreKey(server));
+  } catch (_) {
+    // 持久化失败不影响本次请求；下次运行仍可用配置里的 Token。
+  }
+}
+
+function vpsAuthStoreKey(server) {
+  var seed = [server.name, server.token, server.refreshToken].join("|");
+  var hash = 2166136261;
+  for (var index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+  return "vps-monitor.vps-auth." + (hash >>> 0).toString(16);
+}
+
+function vpsAuthHeaders(token) {
+  return {
+    Accept: "application/json",
+    Authorization: "Bearer " + stripBearer(token)
+  };
+}
+
+function stripBearer(token) {
+  return String(token || "").replace(/^Bearer\s+/i, "").trim();
+}
+
+function jwtExpiresSoon(token, skewSeconds) {
+  var parts = stripBearer(token).split(".");
+  if (parts.length !== 3) return false;
+
+  try {
+    var payload = JSON.parse(decodeBase64Url(parts[1]));
+    var expires = Number(payload.exp);
+    if (!isFinite(expires) || expires <= 0) return false;
+    return expires <= Math.floor(Date.now() / 1000) + Number(skewSeconds || 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+function decodeBase64Url(input) {
+  var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var value = String(input || "").replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/g, "");
+  var output = "";
+  var buffer = 0;
+  var bits = 0;
+
+  for (var index = 0; index < value.length; index += 1) {
+    var digit = alphabet.indexOf(value.charAt(index));
+    if (digit < 0) throw new Error("无效的 Base64URL");
+    buffer = (buffer << 6) | digit;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      output += String.fromCharCode((buffer >> bits) & 255);
+    }
+  }
+  return output;
 }
 
 function normalizeVpsResult(server, service, resourceJson, vmJson) {
@@ -382,9 +541,22 @@ function normalizeVpsResult(server, service, resourceJson, vmJson) {
 }
 
 function getJson(url, headers, timeout, callback) {
-  httpGet({ url: url, headers: headers, timeout: timeout }, function (error, data) {
+  requestJson("get", { url: url, headers: headers, timeout: timeout }, callback);
+}
+
+function postJson(url, body, timeout, callback) {
+  requestJson("post", {
+    url: url,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+    timeout: timeout
+  }, callback);
+}
+
+function requestJson(method, options, callback) {
+  httpRequest(method, options, function (error, data, status) {
     if (error) {
-      callback(error);
+      callback(error, null, status);
       return;
     }
 
@@ -392,18 +564,18 @@ function getJson(url, headers, timeout, callback) {
     try {
       json = JSON.parse(data);
     } catch (_) {
-      callback("API 返回的不是有效 JSON");
+      callback("API 返回的不是有效 JSON", null, status);
       return;
     }
 
     var hasError = json && (Array.isArray(json.error) ? json.error.length > 0 : Boolean(json.error));
     if (hasError) {
       var message = Array.isArray(json.error) ? json.error.join("；") : json.error;
-      callback(cleanMessage(message || json.message || "API 返回错误"));
+      callback(cleanMessage(message || json.message || "API 返回错误"), null, status);
       return;
     }
 
-    callback(null, json);
+    callback(null, json, status);
   });
 }
 
@@ -479,36 +651,46 @@ function normalizeJsonResult(server, json) {
 }
 
 function httpGet(options, callback) {
+  httpRequest("get", options, callback);
+}
+
+function httpRequest(method, options, callback) {
   var settled = false;
   var timeoutSeconds = clampNumber(options && options.timeout, 2, 10, 6);
   var watchdog = setTimeout(function () {
-    finish("请求超时");
+    finish("请求超时", null, 0);
   }, timeoutSeconds * 1000 + 300);
 
-  function finish(error, data) {
+  function finish(error, data, status) {
     if (settled) return;
     settled = true;
     if (typeof clearTimeout === "function") clearTimeout(watchdog);
-    callback(error, data);
+    callback(error, data, status || 0);
   }
 
   try {
-    $httpClient.get(options, function (error, response, data) {
+    var requester = $httpClient && $httpClient[method];
+    if (typeof requester !== "function") {
+      finish("当前 Surge 环境不支持 HTTP " + String(method).toUpperCase(), null, 0);
+      return;
+    }
+
+    requester.call($httpClient, options, function (error, response, data) {
       if (error) {
-        finish(classifyNetworkError(error));
+        finish(classifyNetworkError(error), null, 0);
         return;
       }
 
       var status = response && Number(response.status || response.statusCode || 0);
       if (status >= 400) {
-        finish("HTTP " + status);
+        finish("HTTP " + status, null, status);
         return;
       }
 
-      finish(null, data == null ? "" : String(data));
+      finish(null, data == null ? "" : String(data), status);
     });
   } catch (error) {
-    finish(classifyNetworkError(error));
+    finish(classifyNetworkError(error), null, 0);
   }
 }
 
