@@ -601,7 +601,7 @@ function normalizeVpsResult(server, service, resourceJson, vmJson) {
     traffic: {
       used: usedTrafficGb == null ? null : usedTrafficGb * Math.pow(1024, 3),
       total: totalTrafficGb == null ? null : totalTrafficGb * Math.pow(1024, 3),
-      reset: ""
+      reset: nextMonthlyTrafficReset()
     },
     memory: {
       used: null,
@@ -951,6 +951,11 @@ function parseTimestamp(value) {
   if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(text)) text += "T23:59:59";
   var timestamp = new Date(text).getTime();
   return isNaN(timestamp) ? null : timestamp;
+}
+
+function nextMonthlyTrafficReset() {
+  var now = new Date();
+  return new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
 }
 
 function formatDateWithDays(value) {
