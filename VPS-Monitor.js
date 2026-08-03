@@ -10,8 +10,9 @@
  *
  * 多台服务器参数（字段中的特殊字符请先做 URL 编码）：
  *   server1=名称|bwg|VEID|API_KEY|YYYY-MM-DD
- *   server2=V.PS|vps|ACCESS_TOKEN|REFRESH_TOKEN|
- *   server3=名称|json|URL|BEARER_TOKEN|YYYY-MM-DD
+ *   server2=V.PS|vps|ACCESS_TOKEN|REFRESH_TOKEN|EMAIL|PASSWORD
+ *   server3=V.PS|vps|||EMAIL|PASSWORD（全自动登录模式）
+ *   server4=名称|json|URL|BEARER_TOKEN|YYYY-MM-DD
  */
 
 (function () {
@@ -157,7 +158,9 @@ function parseServerValue(value) {
       name: parts[0] || "V.PS",
       provider: "vps",
       token: parts[2],
-      refreshToken: parts[3]
+      refreshToken: parts[3],
+      username: parts[4],
+      password: parts.slice(5).join("|")
     });
   }
 
@@ -178,8 +181,10 @@ function normalizeServerConfig(config) {
     url: String(config.url || config.endpoint || ""),
     token: String(config.token || ""),
     refreshToken: String(config.refreshToken || config.refresh || config.refresh_token || ""),
+    username: String(config.username || config.email || ""),
+    password: String(config.password || ""),
     headers: config.headers && typeof config.headers === "object" ? config.headers : null,
-    expires: config.expires || config.expires_at || config.expiration || "",
+    expires: sanitizeExpiry(config.expires || config.expires_at || config.expiration || ""),
     error: config.error || ""
   };
 }
@@ -266,14 +271,14 @@ function fetchBwg(server, callback, timeout) {
         used: nullableNumber(json.ve_used_disk_space_b),
         total: nullableNumber(json.plan_disk)
       },
-      expires: server.expires || json.plan_expiration || json.expires_at || ""
+      expires: sanitizeExpiry(server.expires || json.plan_expiration || json.expires_at || "")
     });
   });
 }
 
 function fetchVpsAccount(server, callback, timeout) {
-  if (!server.token && !server.refreshToken) {
-    callback(errorResult(server, "缺少 V.PS Access Token 或 Refresh Token"));
+  if (!server.token && !server.refreshToken && !hasVpsLogin(server)) {
+    callback(errorResult(server, "缺少 V.PS Token，或自动登录所需的邮箱和密码"));
     return;
   }
 
@@ -290,20 +295,20 @@ function fetchVpsServices(server, auth, timeout, callback, retried) {
   var headers = vpsAuthHeaders(auth.token);
 
   getJson("https://vps.hosting/api/service", headers, timeout, function (error, json, status) {
-    if (status === 401 && auth.refresh && !retried) {
-      refreshVpsAuth(server, auth.refresh, timeout, function (refreshError, refreshedAuth) {
-        if (refreshError) {
-          callback(errorResult(server, refreshError));
+    if (isVpsAuthError(error, status) && !retried && (auth.refresh || hasVpsLogin(server))) {
+      renewVpsAuth(server, auth, timeout, function (renewError, renewedAuth) {
+        if (renewError) {
+          callback(errorResult(server, renewError));
           return;
         }
-        fetchVpsServices(server, refreshedAuth, timeout, callback, true);
+        fetchVpsServices(server, renewedAuth, timeout, callback, true);
       });
       return;
     }
 
     if (error) {
-      var message = status === 401
-        ? "V.PS Access Token 已失效，请更新 Token"
+      var message = isVpsAuthError(error, status)
+        ? "V.PS 自动认证失败，请检查账户凭据"
         : error;
       callback(errorResult(server, message));
       return;
@@ -351,8 +356,8 @@ function fetchVpsServices(server, auth, timeout, callback, retried) {
 
 function resolveVpsAuth(server, timeout, callback) {
   var auth = loadVpsAuth(server);
-  if ((!auth.token || jwtExpiresSoon(auth.token, 60)) && auth.refresh) {
-    refreshVpsAuth(server, auth.refresh, timeout, callback);
+  if (!auth.token || jwtExpiresSoon(auth.token, 60)) {
+    renewVpsAuth(server, auth, timeout, callback);
     return;
   }
 
@@ -362,6 +367,71 @@ function resolveVpsAuth(server, timeout, callback) {
   }
 
   callback(null, auth);
+}
+
+function renewVpsAuth(server, auth, timeout, callback) {
+  if (auth && auth.refresh) {
+    refreshVpsAuth(server, auth.refresh, timeout, function (refreshError, refreshedAuth) {
+      if (!refreshError) {
+        callback(null, refreshedAuth);
+        return;
+      }
+
+      if (hasVpsLogin(server)) {
+        loginVpsAuth(server, timeout, callback);
+        return;
+      }
+
+      callback(refreshError);
+    });
+    return;
+  }
+
+  if (hasVpsLogin(server)) {
+    loginVpsAuth(server, timeout, callback);
+    return;
+  }
+
+  callback("缺少可用的 V.PS Access Token 或自动登录凭据");
+}
+
+function loginVpsAuth(server, timeout, callback) {
+  postJson(
+    "https://vps.hosting/api/login",
+    { username: server.username, password: server.password },
+    timeout,
+    function (error, json, status) {
+      if (error) {
+        var message = status === 401 || status === 403 || /login|credential|password/i.test(String(error))
+          ? "V.PS 自动登录失败：邮箱或密码错误"
+          : "V.PS 自动登录失败：" + error;
+        callback(message);
+        return;
+      }
+
+      var payload = json && json.data && typeof json.data === "object" ? json.data : (json || {});
+      var auth = {
+        token: stripBearer(payload.token || payload.access_token || ""),
+        refresh: stripBearer(payload.refresh || payload.refresh_token || "")
+      };
+      if (!auth.token) {
+        callback("V.PS 自动登录失败：接口未返回 Access Token");
+        return;
+      }
+
+      saveVpsAuth(server, auth);
+      callback(null, auth);
+    }
+  );
+}
+
+function hasVpsLogin(server) {
+  return Boolean(server && server.username && server.password);
+}
+
+function isVpsAuthError(error, status) {
+  if (status === 401 || status === 403) return true;
+  return /unauthori[sz]ed|token[^\n]*(invalid|expired)|refresh_token_invalid/i.test(String(error || ""));
 }
 
 function refreshVpsAuth(server, refreshToken, timeout, callback) {
@@ -431,7 +501,7 @@ function saveVpsAuth(server, auth) {
 }
 
 function vpsAuthStoreKey(server) {
-  var seed = [server.name, server.token, server.refreshToken].join("|");
+  var seed = [server.name, server.token, server.refreshToken, server.username].join("|");
   var hash = 2166136261;
   for (var index = 0; index < seed.length; index += 1) {
     hash ^= seed.charCodeAt(index);
@@ -449,6 +519,12 @@ function vpsAuthHeaders(token) {
 
 function stripBearer(token) {
   return String(token || "").replace(/^Bearer\s+/i, "").trim();
+}
+
+function sanitizeExpiry(value) {
+  var text = String(value || "").trim();
+  if (!text || /^(YOUR_|YOUR\s|YYYY|请填|填写|你的)/i.test(text)) return "";
+  return text;
 }
 
 function jwtExpiresSoon(token, skewSeconds) {
