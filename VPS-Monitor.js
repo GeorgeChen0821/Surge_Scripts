@@ -601,7 +601,10 @@ function normalizeVpsResult(server, service, resourceJson, vmJson) {
     traffic: {
       used: usedTrafficGb == null ? null : usedTrafficGb * Math.pow(1024, 3),
       total: totalTrafficGb == null ? null : totalTrafficGb * Math.pow(1024, 3),
-      reset: nextMonthlyTrafficReset()
+      reset: nextMonthlyResetFromAnchor(
+        service.date_created || service.created_at || service.created || service.next_due || service.expires
+      ),
+      resetEstimated: true
     },
     memory: {
       used: null,
@@ -866,7 +869,7 @@ function renderServer(item, settings) {
 
   var dates = [];
   if (item.traffic && item.traffic.reset) {
-    dates.push("重置 " + formatDateWithDays(item.traffic.reset));
+    dates.push((item.traffic.resetEstimated ? "预计重置 " : "重置 ") + formatDateWithDays(item.traffic.reset));
   }
   if (item.expires) {
     dates.push("到期 " + formatDateWithDays(item.expires));
@@ -953,9 +956,21 @@ function parseTimestamp(value) {
   return isNaN(timestamp) ? null : timestamp;
 }
 
-function nextMonthlyTrafficReset() {
+function nextMonthlyResetFromAnchor(value) {
+  var anchorTimestamp = parseTimestamp(value);
+  if (anchorTimestamp == null) return null;
+
   var now = new Date();
-  return new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  var anchorDay = new Date(anchorTimestamp).getDate();
+  var year = now.getFullYear();
+  var month = now.getMonth();
+
+  if (now.getDate() >= anchorDay) {
+    month += 1;
+  }
+
+  var lastDay = new Date(year, month + 1, 0).getDate();
+  return new Date(year, month, Math.min(anchorDay, lastDay), 23, 59, 59).getTime();
 }
 
 function formatDateWithDays(value) {
