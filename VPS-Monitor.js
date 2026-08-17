@@ -24,7 +24,7 @@
     icon: args.icon || "server.rack",
     requestTimeout: clampNumber(args.request_timeout || args.requestTimeout, 2, 10, 6),
     showDetails: parseBoolean(args.detail, true),
-    showBar: parseBoolean(args.bar, true)
+    showBar: parseBoolean(args.bar, false)
   };
   var servers = parseServers(args);
 
@@ -847,34 +847,38 @@ function renderServer(item, settings) {
 
   if (hasUsage(item.traffic)) {
     var trafficRatio = percentage(item.traffic.used, item.traffic.total);
-    var trafficLine = "流量  " + formatUsage(item.traffic.used, item.traffic.total, true);
-    if (settings.showBar && trafficRatio != null) trafficLine += "  " + progressBar(trafficRatio, 8);
-    lines.push(trafficLine);
+    lines.push("流量  " + formatUsage(item.traffic.used, item.traffic.total, true));
+    if (settings.showBar && trafficRatio != null) {
+      lines.push("进度  " + progressBar(trafficRatio, 10));
+    }
   } else {
     lines.push("流量  暂无数据");
   }
 
   if (settings.showDetails) {
-    var details = [];
     if (item.resourceMode === "plan") {
-      if (item.memory && item.memory.total != null) details.push("内存 " + formatBytes(item.memory.total));
-      if (item.disk && item.disk.total != null) details.push("磁盘 " + formatBytes(item.disk.total));
-      if (details.length) details[0] = "配置 " + details[0];
+      if (item.memory && item.memory.total != null) {
+        lines.push("内存  " + formatBytes(item.memory.total) + "（套餐）");
+      }
+      if (item.disk && item.disk.total != null) {
+        lines.push("磁盘  " + formatBytes(item.disk.total) + "（套餐）");
+      }
     } else {
-      if (hasUsage(item.memory)) details.push("内存 " + formatUsage(item.memory.used, item.memory.total, true));
-      if (hasUsage(item.disk)) details.push("磁盘 " + formatUsage(item.disk.used, item.disk.total, true));
+      if (hasUsage(item.memory)) {
+        lines.push("内存  " + formatUsage(item.memory.used, item.memory.total, true));
+      }
+      if (hasUsage(item.disk)) {
+        lines.push("磁盘  " + formatUsage(item.disk.used, item.disk.total, true));
+      }
     }
-    if (details.length) lines.push(details.join(" · "));
   }
 
-  var dates = [];
   if (item.traffic && item.traffic.reset) {
-    dates.push((item.traffic.resetEstimated ? "预计重置 " : "重置 ") + formatDateWithDays(item.traffic.reset));
+    lines.push((item.traffic.resetEstimated ? "预计重置  " : "重置  ") + formatDateWithDays(item.traffic.reset, false));
   }
   if (item.expires) {
-    dates.push("到期 " + formatDateWithDays(item.expires));
+    lines.push("到期  " + formatDateWithDays(item.expires, true));
   }
-  if (dates.length) lines.push(dates.join(" ｜ "));
 
   return lines;
 }
@@ -973,16 +977,16 @@ function nextMonthlyResetFromAnchor(value) {
   return new Date(year, month, Math.min(anchorDay, lastDay), 23, 59, 59).getTime();
 }
 
-function formatDateWithDays(value) {
+function formatDateWithDays(value, includeYear) {
   var timestamp = parseTimestamp(value);
   if (timestamp == null) return String(value);
   var date = new Date(timestamp);
-  var label = date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate());
+  var label = (includeYear ? date.getFullYear() + "-" : "") + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate());
   var days = daysUntil(timestamp);
   if (days == null) return label;
-  if (days < 0) return label + " · 已过期 " + Math.abs(days) + " 天";
-  if (days === 0) return label + " · 今天";
-  return label + " · " + days + " 天";
+  if (days < 0) return label + "（已过期 " + Math.abs(days) + " 天）";
+  if (days === 0) return label + "（今天）";
+  return label + "（" + days + " 天）";
 }
 
 function daysUntil(value) {
